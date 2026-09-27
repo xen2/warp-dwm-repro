@@ -125,7 +125,32 @@ jobs:
               Where-Object Message -match 'dwm\.exe' | Select-Object -First 1
           if ($crash) { $crash.Message | Tee-Object -FilePath dwm-crash-event.txt }
 
-      - name: Upload results and the dwm.exe dump
+      # ETW traces (WPR GPU + DesktopComposition profiles) of one top-level run with the bad WARP and one with the
+      # good WARP, for GPUView or Windows Performance Analyzer
+      - name: Record ETW traces
+        shell: pwsh
+        run: |
+          function DwmCrashCount {
+              @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error' } -ErrorAction SilentlyContinue |
+                  Where-Object Message -match 'dwm\.exe').Count
+          }
+          New-Item -ItemType Directory -Path traces -Force | Out-Null
+          foreach ($warp in $env:BAD_WARP, $env:GOOD_WARP) {
+              wpr -cancel 2>$null | Out-Null
+              wpr -start GPU -start DesktopComposition -filemode
+              if ($LASTEXITCODE -ne 0) { Write-Host "wpr -start failed ($LASTEXITCODE)"; exit 1 }
+              $before = DwmCrashCount
+              $start = (Get-Date).ToUniversalTime()
+              $process = Start-Process "run\$warp\warp-dwm-repro.exe" -ArgumentList '--mode top-level --seconds 10' -NoNewWindow -Wait -PassThru
+              Start-Sleep -Seconds 3
+              $trace = "traces\warp-$warp-top-level.etl"
+              wpr -stop $trace "WARP $warp, warp-dwm-repro --mode top-level"
+              if ($LASTEXITCODE -ne 0) { Write-Host "wpr -stop failed ($LASTEXITCODE)"; exit 1 }
+              Write-Host ("WARP {0}: started {1:HH:mm:ss} UTC, exit {2}, dwm crashes {3}, trace {4:N0} MB" -f `
+                  $warp, $start, $process.ExitCode, ((DwmCrashCount) - $before), ((Get-Item $trace).Length / 1MB))
+          }
+
+      - name: Upload results, the dwm.exe dump and the ETW traces
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -135,4 +160,5 @@ jobs:
             dwm-crash-event.txt
             run/**/*.txt
             dumps/
+            traces/
           if-no-files-found: ignore

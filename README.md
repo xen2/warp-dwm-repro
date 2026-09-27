@@ -34,7 +34,8 @@ We found this in a game editor that hosts its game view this way: the game threa
 2. builds `main.cpp`;
 3. runs each mode for 10 seconds with each of three WARPs: the OS WARP, a good NuGet WARP and a bad one. Run the workflow manually to choose the versions (`good-warp`, default 1.0.12; `bad-warp`, default 1.0.21); a push uses the defaults;
 4. counts the DWM crashes in the Application event log;
-5. uploads the results table and a full `dwm.exe` dump.
+5. records ETW traces (WPR `GPU` and `DesktopComposition` profiles) of a `top-level` run with the bad WARP, and one with the good WARP;
+6. uploads the results table, a full `dwm.exe` dump and the traces.
 
 ### Run it locally
 
