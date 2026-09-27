@@ -1,0 +1,138 @@
+name: WARP DWM crash repro
+
+on:
+  workflow_dispatch:
+    inputs:
+      good-warp:
+        description: Microsoft.Direct3D.WARP version without the bug (1.0.12 is the last good release)
+        default: '1.0.12'
+        type: string
+      bad-warp:
+        description: Microsoft.Direct3D.WARP version with the bug (1.0.13 is the first bad release)
+        default: '1.0.21'
+        type: string
+  push:
+
+env:
+  GOOD_WARP: ${{ inputs.good-warp || '1.0.12' }}
+  BAD_WARP: ${{ inputs.bad-warp || '1.0.21' }}
+
+jobs:
+  repro:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keep a full dwm.exe crash dump
+        shell: pwsh
+        run: |
+          $dumps = "${{ github.workspace }}\dumps"
+          New-Item -ItemType Directory -Path $dumps -Force | Out-Null
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting" /v DontShowUI /t REG_DWORD /d 1 /f
+          $key = "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\dwm.exe"
+          reg add $key /v DumpFolder /t REG_EXPAND_SZ /d $dumps /f
+          reg add $key /v DumpType /t REG_DWORD /d 2 /f
+          reg add $key /v DumpCount /t REG_DWORD /d 1 /f
+
+      # Amyuni usbmmidd_v2: a signed indirect display (IDD) virtual monitor. It becomes the only display.
+      - name: Install an IDD virtual display (Amyuni usbmmidd_v2) at 3840x2160
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:TEMP "usbmmidd"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          Invoke-WebRequest -Uri "https://www.amyuni.com/downloads/usbmmidd_v2.zip" -OutFile "$dir\usbmmidd.zip" -UseBasicParsing
+          Expand-Archive -Path "$dir\usbmmidd.zip" -DestinationPath $dir -Force
+          $pkg = Join-Path $dir "usbmmidd_v2"
+          $certificates = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+          $certificates.Import([System.IO.File]::ReadAllBytes("$pkg\usbmmidd.cat"))
+          foreach ($cert in $certificates) {
+              $certPath = Join-Path $dir "$($cert.Thumbprint).cer"
+              [System.IO.File]::WriteAllBytes($certPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+              Import-Certificate -FilePath $certPath -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
+          }
+          Push-Location $pkg
+          .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
+          # The monitor's default mode; the install created the key with the list of modes
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\usbmmIdd\Parameters\Monitors" -Name '(Default)' -Value '3840,2160'
+          .\deviceinstaller64.exe enableidd 1
+          Pop-Location
+          Start-Sleep -Seconds 10
+          # The install may open an advertisement page
+          Get-Process msedge, chrome, firefox, iexplore -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          # Make the virtual monitor the only display
+          Get-PnpDevice -Class Display | Where-Object FriendlyName -like "*Hyper-V*" |
+              ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false }
+          Start-Sleep -Seconds 5
+          Get-PnpDevice -Class Display | Format-Table FriendlyName, Status
+          Add-Type -AssemblyName System.Windows.Forms
+          foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+              Write-Host "Screen $($screen.DeviceName) primary=$($screen.Primary) bounds=$($screen.Bounds.Width)x$($screen.Bounds.Height)"
+          }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          Push-Location build
+          cl /nologo /O2 /EHsc /W4 /std:c++17 ..\main.cpp /Fe:warp-dwm-repro.exe d3d12.lib dxgi.lib user32.lib
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Pop-Location
+
+      # One copy of the exe per WARP: none (OS WARP), the good version and the bad version
+      - name: Download WARP releases
+        shell: pwsh
+        run: |
+          Write-Host "OS: $((Get-CimInstance Win32_OperatingSystem).Caption) $([Environment]::OSVersion.Version)"
+          Write-Host "OS WARP: $((Get-Item "$env:SystemRoot\System32\d3d10warp.dll").VersionInfo.FileVersion)"
+          New-Item -ItemType Directory -Path run\os -Force | Out-Null
+          Copy-Item build\warp-dwm-repro.exe run\os
+          foreach ($version in $env:GOOD_WARP, $env:BAD_WARP) {
+              $extract = "$env:RUNNER_TEMP\warp-$version"
+              Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.WARP/$version" -OutFile "$extract.zip" -UseBasicParsing
+              Expand-Archive -Path "$extract.zip" -DestinationPath $extract -Force
+              New-Item -ItemType Directory -Path "run\$version" -Force | Out-Null
+              Copy-Item build\warp-dwm-repro.exe, "$extract\build\native\bin\x64\d3d10warp.dll" "run\$version"
+              Write-Host "WARP $version`: $((Get-Item "run\$version\d3d10warp.dll").VersionInfo.FileVersion)"
+          }
+
+      # Each run lasts 10 s. The DWM crash loop stops when the process exits: crashes after exit show if a run affects the next.
+      - name: Run each mode with each WARP
+        shell: pwsh
+        run: |
+          function DwmCrashCount {
+              @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error' } -ErrorAction SilentlyContinue |
+                  Where-Object Message -match 'dwm\.exe').Count
+          }
+          $results = foreach ($mode in 'top-level', 'direct-child', 'reparent') {
+              foreach ($warp in 'os', $env:GOOD_WARP, $env:BAD_WARP) {
+                  $output = "run\$warp\$mode.txt"
+                  $before = DwmCrashCount
+                  $process = Start-Process "run\$warp\warp-dwm-repro.exe" -ArgumentList "--mode $mode --seconds 10" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $output
+                  $during = (DwmCrashCount) - $before
+                  Start-Sleep -Seconds 8
+                  $after = (DwmCrashCount) - $before - $during
+                  [pscustomobject]@{ Mode = $mode; WARP = $warp; Exit = $process.ExitCode; DwmCrashes = $during; DwmCrashesAfterExit = $after }
+                  Get-Content $output | ForEach-Object { Write-Host "  $_" }
+              }
+          }
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Out-File results.txt
+          $crash = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error' } -ErrorAction SilentlyContinue |
+              Where-Object Message -match 'dwm\.exe' | Select-Object -First 1
+          if ($crash) { $crash.Message | Tee-Object -FilePath dwm-crash-event.txt }
+
+      - name: Upload results and the dwm.exe dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: warp-dwm-repro
+          path: |
+            results.txt
+            dwm-crash-event.txt
+            run/**/*.txt
+            dumps/
+          if-no-files-found: ignore
