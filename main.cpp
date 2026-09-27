@@ -1,16 +1,16 @@
 // DWM crash repro: a D3D12 app on WARP (Microsoft.Direct3D.WARP 1.0.13 or later, app-local
-// d3d10warp.dll) presents a flip-model swap chain, and its window is moved into another window
-// with SetParent. On an indirect display (IDD) virtual monitor, dwm.exe then crashes with
-// 0xC00001AD in dwmcore.dll about once per second while the app runs. The OS WARP and
-// WARP 1.0.12 do not crash.
+// d3d10warp.dll) presents a flip-model swap chain to a window. On an indirect display (IDD)
+// virtual monitor, dwm.exe then crashes with 0xC00001AD in dwmcore.dll about once per second
+// while the app runs. The OS WARP and WARP 1.0.12 do not crash.
 //
-//   warp-dwm-repro [--mode reparent|direct-child|top-level] [--seconds N]
+//   warp-dwm-repro [--mode top-level|direct-child|reparent] [--seconds N]
 //
-//   reparent      (default) a render thread creates a hidden child window under a hidden parking
-//                 window, creates its swap chain and presents a few frames; the main thread then
-//                 moves it into the visible window with SetParent and shows it
-//   direct-child  the render thread creates the child directly under the visible window
-//   top-level     the swap chain is on the visible top-level window itself
+// All three window setups crash; the swap chain's window is owned by a render thread:
+//   top-level     (default) the swap chain is on the visible top-level window itself
+//   direct-child  the render thread creates a child window directly under the visible window
+//   reparent      the render thread creates a hidden child window under a hidden parking window,
+//                 creates its swap chain and presents a few frames; the main thread then moves it
+//                 into the visible window with SetParent and shows it
 //
 // Build: cl /O2 /EHsc /std:c++17 main.cpp d3d12.lib dxgi.lib user32.lib
 
@@ -185,7 +185,7 @@ struct SwapChain
 
 int main(int argc, char** argv)
 {
-    const char* mode = "reparent";
+    const char* mode = "top-level";
     int seconds = 10;
     for (int i = 1; i < argc; ++i)
     {

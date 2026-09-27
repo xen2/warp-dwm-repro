@@ -36,7 +36,7 @@ jobs:
           reg add $key /v DumpCount /t REG_DWORD /d 1 /f
 
       # Amyuni usbmmidd_v2: a signed indirect display (IDD) virtual monitor. It becomes the only display.
-      - name: Install an IDD virtual display (Amyuni usbmmidd_v2) at 3840x2160
+      - name: Install an IDD virtual display (Amyuni usbmmidd_v2)
         shell: pwsh
         run: |
           $dir = Join-Path $env:TEMP "usbmmidd"
@@ -53,8 +53,6 @@ jobs:
           }
           Push-Location $pkg
           .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-          # The monitor's default mode; the install created the key with the list of modes
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\usbmmIdd\Parameters\Monitors" -Name '(Default)' -Value '3840,2160'
           .\deviceinstaller64.exe enableidd 1
           Pop-Location
           Start-Sleep -Seconds 10
